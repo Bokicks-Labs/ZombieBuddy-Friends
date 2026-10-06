@@ -19,7 +19,7 @@ $hashes = Join-Path $out 'SHA256SUMS.txt'
 $paths = @(
     'Install-ZombieBuddy.cmd', 'Install-ZombieBuddy.ps1',
     'Update-ZombieBuddy.cmd', 'Update-ZombieBuddy.ps1',
-    'README.md', 'payload', 'setup'
+    'README.md', 'THIRD-PARTY-NOTICES.md', 'payload', 'setup'
 ) | ForEach-Object { Join-Path $root $_ }
 Compress-Archive -LiteralPath $paths -DestinationPath $zip -Force
 $hash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()

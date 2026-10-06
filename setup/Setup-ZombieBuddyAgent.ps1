@@ -3,17 +3,17 @@ param(
     [ValidateSet('Install', 'Status', 'Restore')]
     [string]$Action = 'Install',
     [string]$ProjectZomboidPath,
-    [switch]$LaunchOfficialInstaller,
+    [string]$OfficialJarPath,
+    [string]$OfficialJarSha256,
     [string]$BackupPath
 )
 
 $ErrorActionPreference = 'Stop'
 
-$expectedInstallerHash = '2A52466AFE804FECE5E88868EEF75A70E8964D3E4E01A3629B57CF6FF19E24B3'
 $expectedPatchHash = '909D1FF579BE34AC2C3EE860A1A499B889A677D0DA74EB4A1D3632AE4E2ED102'
 $expectedPackageJarHash = 'EB79B9876332010733A8E0D7CE4FE0377846059A9E28859029E2A0FB449F6CF2'
+$expectedBaseNativeHash = 'C2AE9335E717EE24B2F4A40D1A3BF77F1519762A72A0459E766A2BBAFC077F6C'
 $expectedNativeHash = '49E5D596B54E5E4EAB535E613CDC7C3F0DE9BB7EF07239C255E2B127657104CE'
-$installerDownloadUrl = 'https://github.com/zed-0xff/ZombieBuddy/releases/download/windows_installer_4.2/ZombieBuddyInstaller_v4.2.exe'
 $nativeDownloadUrl = 'https://github.com/Bokicks-Labs/ZombieBuddy-Windows-Native-Fix/releases/download/v2.3.3-pz42.21-native1/zbNative.dll'
 $patchPath = Join-Path $PSScriptRoot 'ZombieBuddy-2.3.3-B42.21-Fix.jar'
 $backupRoot = Join-Path $env:USERPROFILE 'Zomboid\backups\CW-ZombieBuddy'
@@ -46,6 +46,16 @@ function Get-JarVersion([string]$Path) {
 }
 
 function Get-WorkshopJar([string]$GameRoot) {
+    if ($OfficialJarPath) {
+        if ($OfficialJarSha256 -notmatch '^[A-Fa-f0-9]{64}$') { throw 'An official JAR SHA-256 is required.' }
+        Assert-BundledFile $OfficialJarPath $OfficialJarSha256 'Downloaded official ZombieBuddy JAR'
+        $officialVersionText = Get-JarVersion $OfficialJarPath
+        $officialVersion = $null
+        if (-not [version]::TryParse($officialVersionText, [ref]$officialVersion) -or $officialVersion.Major -ne 2) {
+            throw 'Downloaded official JAR is not a ZombieBuddy 2.x release.'
+        }
+        return [pscustomobject]@{ Path = $OfficialJarPath; Version = $officialVersion; Hash = Get-Sha256 $OfficialJarPath }
+    }
     $packageJar = Join-Path $PSScriptRoot '..\payload\ZombieBuddy\libs\ZombieBuddy.jar'
     if (Test-Path -LiteralPath $packageJar -PathType Leaf) {
         Assert-BundledFile $packageJar $expectedPackageJarHash 'Packaged ZombieBuddy 2.3.4 JAR'
@@ -216,34 +226,6 @@ function Show-State($State) {
     }
 }
 
-function Invoke-OfficialInstaller {
-    if (-not $PSCmdlet.ShouldProcess($installerDownloadUrl, 'Download, verify, and run Zed''s official ZombieBuddy installer v4.2')) {
-        return
-    }
-
-    $downloadRoot = Join-Path ([IO.Path]::GetTempPath()) 'CW-ZombieBuddy'
-    New-Item -ItemType Directory -Path $downloadRoot -Force | Out-Null
-    $downloadPath = Join-Path $downloadRoot ('ZombieBuddyInstaller_v4.2-' + [guid]::NewGuid().ToString('N') + '.exe')
-    try {
-        Write-Output "Downloading Zed's official ZombieBuddy installer from $installerDownloadUrl"
-        try {
-            Invoke-WebRequest -Uri $installerDownloadUrl -OutFile $downloadPath -UseBasicParsing
-        } catch {
-            throw "Could not download the official ZombieBuddy installer. Download it manually from Zed's windows_installer_4.2 GitHub release, verify SHA-256 $expectedInstallerHash, run it, and then rerun this helper. $($_.Exception.Message)"
-        }
-        Assert-BundledFile $downloadPath $expectedInstallerHash 'Downloaded ZombieBuddy installer'
-        Write-Output 'Starting the verified interactive ZombieBuddy installer. Review its preview before accepting changes.'
-        $process = Start-Process -FilePath $downloadPath -Wait -PassThru
-        if ($process.ExitCode -ne 0) {
-            throw "ZombieBuddy installer exited with code $($process.ExitCode)."
-        }
-    } finally {
-        if (Test-Path -LiteralPath $downloadPath -PathType Leaf) {
-            Remove-Item -LiteralPath $downloadPath -Force
-        }
-    }
-}
-
 function Install-Patch([string]$GameRoot, [string]$SourcePath, [string]$SourceHash, [string]$Description) {
     Assert-BundledFile $SourcePath $SourceHash $Description
     Assert-GameStopped $GameRoot
@@ -301,6 +283,71 @@ function Install-Patch([string]$GameRoot, [string]$SourcePath, [string]$SourceHa
     }
     Write-Output "Installed ${Description}: $($state.LiveJar)"
     Write-Output "Backup: $backupJar"
+}
+
+function Install-BaseFiles([string]$GameRoot, [string]$SourceJar, [string]$SourceHash) {
+    Assert-GameStopped $GameRoot
+    $baseDll = Join-Path $PSScriptRoot '..\payload\ZombieBuddy\libs\zbNative.dll'
+    Assert-BundledFile $baseDll $expectedBaseNativeHash 'Bundled original native loader'
+    $liveDll = Join-Path $GameRoot 'zbNative.dll'
+    $liveJar = Join-Path $GameRoot 'ZombieBuddy.jar'
+    if (-not (Test-Path -LiteralPath $liveDll -PathType Leaf)) {
+        if ($PSCmdlet.ShouldProcess($liveDll, 'Install the original ZombieBuddy native loader before applying the pinned fix')) {
+            Copy-Item -LiteralPath $baseDll -Destination $liveDll
+        }
+    }
+    if (-not (Test-Path -LiteralPath $liveJar -PathType Leaf)) {
+        Assert-BundledFile $SourceJar $SourceHash 'ZombieBuddy source JAR'
+        if ($PSCmdlet.ShouldProcess($liveJar, 'Install the verified ZombieBuddy JAR')) {
+            Copy-Item -LiteralPath $SourceJar -Destination $liveJar
+        }
+    }
+}
+
+function Install-LauncherArgs([string]$GameRoot) {
+    Assert-GameStopped $GameRoot
+    $jsonPath = Join-Path $GameRoot 'ProjectZomboid64.json'
+    if (-not (Test-Path -LiteralPath $jsonPath -PathType Leaf)) {
+        throw "Normal launcher configuration is missing: $jsonPath"
+    }
+    $jsonText = Get-Content -Raw -LiteralPath $jsonPath
+    $parsed = $jsonText | ConvertFrom-Json
+    if ($null -eq $parsed.vmArgs) { throw 'Normal launcher JSON has no vmArgs array.' }
+    if (@($parsed.vmArgs) -notcontains '-agentlib:zbNative') {
+        $match = [regex]::Match($jsonText, '"vmArgs"\s*:\s*\[')
+        if (-not $match.Success) { throw 'Could not locate vmArgs in normal launcher JSON.' }
+        $patched = $jsonText.Insert($match.Index + $match.Length, "`r`n`t`t`"-agentlib:zbNative`",")
+        $null = $patched | ConvertFrom-Json
+        if ($PSCmdlet.ShouldProcess($jsonPath, 'Back up and enable ZombieBuddy for normal launch')) {
+            New-Item -ItemType Directory -Path $backupRoot -Force | Out-Null
+            $backup = Join-Path $backupRoot ('ProjectZomboid64-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + [guid]::NewGuid().ToString('N') + '.json')
+            Copy-Item -LiteralPath $jsonPath -Destination $backup
+            [IO.File]::WriteAllText($jsonPath, $patched, [Text.UTF8Encoding]::new($false))
+            Write-Output "Enabled normal launcher. Backup: $backup"
+        }
+    }
+
+    $batPath = Join-Path $GameRoot 'ProjectZomboid64.bat'
+    if (Test-Path -LiteralPath $batPath -PathType Leaf) {
+        $batText = Get-Content -Raw -LiteralPath $batPath
+        if ($batText -notmatch '(?im)^\s*SET\s+_JAVA_OPTIONS=.*-agentlib:zbNative') {
+            $batMatch = [regex]::Match($batText, '(?im)^\s*SET\s+_JAVA_OPTIONS=(?<args>[^\r\n]*)')
+            if ($batMatch.Success) {
+                $oldLine = $batMatch.Value
+                $newLine = $oldLine -replace '(?i)(SET\s+_JAVA_OPTIONS=)', '$1-agentlib:zbNative '
+                $patchedBat = $batText.Remove($batMatch.Index, $batMatch.Length).Insert($batMatch.Index, $newLine)
+            } else {
+                $patchedBat = "SET _JAVA_OPTIONS=-agentlib:zbNative`r`n" + $batText
+            }
+            if ($PSCmdlet.ShouldProcess($batPath, 'Back up and enable ZombieBuddy for alternate launch')) {
+                New-Item -ItemType Directory -Path $backupRoot -Force | Out-Null
+                $backup = Join-Path $backupRoot ('ProjectZomboid64-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + [guid]::NewGuid().ToString('N') + '.bat')
+                Copy-Item -LiteralPath $batPath -Destination $backup
+                [IO.File]::WriteAllText($batPath, $patchedBat, [Text.Encoding]::Default)
+                Write-Output "Enabled alternate launcher. Backup: $backup"
+            }
+        }
+    }
 }
 
 function Install-NativePatch([string]$GameRoot) {
@@ -468,11 +515,6 @@ switch ($Action) {
     }
     'Install' {
         $state = Get-AgentState $gameRoot
-        if ((-not $state.LiveJarExists -or -not $state.NativeDllExists) -and $LaunchOfficialInstaller) {
-            Invoke-OfficialInstaller
-            $gameRoot = Resolve-GameRoot $ProjectZomboidPath
-            $state = Get-AgentState $gameRoot
-        }
         if (Test-Path -LiteralPath (Join-Path $gameRoot 'ZombieBuddy.jar.new') -PathType Leaf) {
             throw 'A pending ZombieBuddy.jar.new update would replace the compatibility JAR at startup. Resolve it before installing.'
         }
@@ -486,6 +528,10 @@ switch ($Action) {
             $sourceHash = $workshopJar.Hash
             $sourceVersion = $workshopJar.Version
             $description = "packaged ZombieBuddy $sourceVersion JAR"
+        }
+        if (-not $state.LiveJarExists -or -not $state.NativeDllExists) {
+            Install-BaseFiles $gameRoot $sourcePath $sourceHash
+            $state = Get-AgentState $gameRoot
         }
         $liveVersion = $null
         if ($state.LiveJarExists -and -not $state.IsPatched) {
@@ -504,6 +550,7 @@ switch ($Action) {
         } else {
             Write-Output 'Keeping the installed ZombieBuddy JAR; it is current or newer.'
         }
+        Install-LauncherArgs $gameRoot
         Show-State (Get-AgentState $gameRoot)
     }
     'Restore' {
